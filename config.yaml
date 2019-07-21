@@ -1,0 +1,51 @@
+---
+# log level
+log_level: "debug"
+
+# path to output directory
+out_dir: "out"
+
+# array of hosts to benchmark
+# (order determines output order)
+hosts:
+  - name: "pi0w-zero"
+    host: "zero"
+    text: "Raspberry Pi Zero W"
+    arch: "armv6l"
+    pi:   true
+
+  - name: "pi3b-peach" 
+    host: "peach" 
+    text: "Raspberry Pi 3 Model B"
+    arch: "armv7l"
+    pi:   true
+
+  - name: "pi3b+-pecan" 
+    host: "pecan" 
+    text: "Raspberry Pi 3 Model B+"
+    arch: "armv7l"
+    pi:   true
+
+  - name: "pi4b-cherry" 
+    host: "cherry"
+    text: "Raspberry Pi 4 Model B"
+    arch: "armv7l"
+    pi:   true
+
+  - name: "i78650u-flex"
+    host: "flex"
+    text: "Intel i7-8650U"
+    arch: "amd64"
+    pi:   false
+
+  - name: "linode"
+    host: "pmdn.org"
+    text: "Linode VM (1 Core)"
+    arch: "amd64"
+    pi:   false
+
+  - name: "tr1950x-v4"
+    host: "v4.wg"
+    text: "AMD Ryzen Threadripper 1950X"
+    arch: "amd64"
+    pi:   false
