@@ -1,14 +1,14 @@
 #!/usr/bin/env ruby
 
 #
-# gen.rb: Benchmark OpenSSL ciphers on several systems, then do
+# run.rb: Benchmark OpenSSL ciphers on several systems, then do
 # the following:
 #
 #   * aggregate the results as CSV files
 #   * create SVG charts of the results
 #   * generate HTML fragments for the SVG results
 #
-# Usage: ./gen.rb config.yaml
+# Usage: ./run.rb config.yaml
 #
 # See included `config.yaml` for configuration options
 #
@@ -19,7 +19,7 @@ require 'csv'
 require 'logger'
 require 'json'
 
-module Tentacle
+module PiBench
   # block sizes
   SIZES = %w{16 64 256 1024 8192 16384}
 
@@ -692,4 +692,4 @@ module Tentacle
 end
 
 # allow cli invocation
-Tentacle.run($0, ARGV) if __FILE__ == $0
+PiBench.run($0, ARGV) if __FILE__ == $0
