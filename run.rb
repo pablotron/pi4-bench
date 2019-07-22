@@ -106,20 +106,34 @@ module PiBench
   #
   ARCHS = {
     all: {
-      name: 'All',
+      name: 'All Systems',
       text: %{
         <p>
-          Test results for all systems.  Note that the x86-64 systems
-          include AES-NI and SHA2 hardware acceleration.
+          OpenSSL speed test results by algorithm across all systems.
+        </p>
+
+        <p>
+          Note: The CPUs in the x86-64 systems include <a
+            href='https://en.wikipedia.org/wiki/AES_instruction_set'
+            title='Intel AES-NI instructions.'
+          >AES hardware acceleration instructions (AES-NI)</a>, and the
+          CPUs in the Raspberry Pi systems do not.
+        </p>
+
+        <p>
+          In other words, AES results should only be interpreted as the
+          speed at which the given CPU can perform AES operations, and
+          not as a cross-architecture processing power comparison.
         </p>
       }.strip,
     },
 
     arm: {
-      name: 'Pis',
+      name: 'Raspberry Pis',
       text: %{
         <p>
-          Test results for Raspberry Pi systems only.
+          OpenSSL speed test results by algorithm for Raspberry Pi
+          systems only.
         </p>
       }.strip,
     },
@@ -128,7 +142,8 @@ module PiBench
       name: 'x86-64',
       text: %{
         <p>
-          Test results for x86-64 systems only.
+          OpenSSL speed test results, by algorithm for x86-64 systems
+          only.
         </p>
       }.strip,
     },
@@ -221,17 +236,49 @@ module PiBench
     }.strip,
 
     svg_title: %{
-      Speed Test Results (Systems: %{arch|h}, Algorithm: %{algo|h})
+      OpenSSL Test Speed Results: %{arch|h}, %{algo|h}
     }.strip,
 
     svg: %{
       <img
-        src='%{path|h}'
+        src='%{svg_path|h}'
         class='img-fluid'
         title='%{name|h}'
         alt='%{name|h}'
       />
+
+      <!-- table class='hide table table-bordered table-sm table-hover'>
+        <thead>
+          <tr>
+            <td>Name</td>
+            <td>Speed</td>
+          </tr>
+        </thead>
+
+        <tbody>
+          %{rows}
+        </tbody>
+
+        <tfoot>
+          <tr>
+            <td colspan='2'>
+              <a
+                href='%{csv_path|h}'
+                title='Download CSV.'
+              >
+                Download
+              </a>
+            </td>
+        </tfoot>
+      </table -->
     }.strip,
+
+    svg_row: %{
+      <tr>
+        <td>%{name|h}</td>
+        <td>%{val|h}</td>
+      </tr>
+    },
 
     link: %{
       <li>
@@ -602,6 +649,7 @@ module PiBench
           svgs[arch] << {
             algo: algo,
             path: svg[:path],
+            rows: svg[:rows].reverse,
             title: svg[:title],
           }
 
@@ -626,8 +674,21 @@ module PiBench
           a[:path] <=> b[:path]
         }.map { |row|
           TEMPLATES[:svg].run({
-            path: 'svgs/%s' % [File.basename(row[:path])],
+            svg_path: 'svgs/%s' % [File.basename(row[:path])],
+
+            # path to downloadable CSV
+            csv_path: 'csvs/%s' % [
+              File.basename(row[:path]).gsub(/svg$/, 'csv'),
+            ],
+
             name: row[:title],
+
+            rows: row[:rows].map { |row|
+              TEMPLATES[:svg_row].run({
+                name: row[0],
+                val: row[1],
+              })
+            }.join,
           })
         }.join
 
@@ -751,7 +812,7 @@ module PiBench
         rows: rows.map { |row|
           [
             '%s (%d bytes)' % [row[0], row[1].to_i],
-            row[2].to_f / 1048576,
+            (row[2].to_f / 1048576).round(2),
           ]
         }.reverse,
       }
