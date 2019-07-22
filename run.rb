@@ -18,6 +18,7 @@ require 'yaml'
 require 'csv'
 require 'logger'
 require 'json'
+require 'luigi-template'
 
 module PiBench
   # block sizes
@@ -94,54 +95,164 @@ module PiBench
     }, {
       id:   'text',
       name: 'Description',
+    }, {
+      id:   'openssl',
+      name: 'OpenSSL Version',
     }],
   }.freeze
 
   #
-  # Architecture titles format strings.
+  # Architecture strings.
   #
-  ARCH_TITLES = {
-    all: 'OpenSSL Speed: All Systems, %s',
-    arm: 'OpenSSL Speed: Raspberry Pis, %s',
-    x86: 'OpenSSL Speed: x86-64, %s',
-  }
+  ARCHS = {
+    all: {
+      name: 'All',
+      text: %{
+        <p>
+          Test results for all systems.  Note that the x86-64 systems
+          include AES-NI and SHA2 hardware acceleration.
+        </p>
+      }.strip,
+    },
 
-  HTML = {
+    arm: {
+      name: 'Pis',
+      text: %{
+        <p>
+          Test results for Raspberry Pi systems only.
+        </p>
+      }.strip,
+    },
+
+    x86: {
+      name: 'x86-64',
+      text: %{
+        <p>
+          Test results for x86-64 systems only.
+        </p>
+      }.strip,
+    },
+  }.freeze
+
+  LINKS = [{
+    href:   'csvs/all-all.csv',
+    title:  'Download all results as a CSV file.',
+    text:   'Download Results (CSV)',
+  }, {
+    href:   'https://github.com/pablotron/p4-bench',
+    title:  'View code on GitHub.',
+    text:   'GitHub Page',
+  }].freeze
+
+  TEMPLATES = Luigi::Cache.new({
+    index: %{
+      <!DOCTYPE html>
+      <html lang='en'>
+        <head>
+          <meta charset='utf-8'/>
+          <meta
+            name='viewport'
+            content='width=device-width, initial-scale=1, shrink-to-fit=no'
+          />
+
+          <link
+            rel='stylesheet'
+            type='text/css'
+            href='https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css'
+            integrity='sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T'
+            crossorigin='anonymous'
+          />
+
+          <title>%{title|h}</title>
+        </head>
+
+        <body>
+          <div class='container'>
+            <h1>%{title|h}</h1>
+
+            <p>
+              This page contains OpenSSL benchmarks across several
+              Raspberry Pis and x86-64 systems generated using the
+              <code>openssl speed</code> command.
+            </p>
+
+            <ul>
+              %{links}
+            </ul>
+
+            <section>
+              <h2>Systems</h2>
+
+              <p>
+                Test system details.
+              </p>
+
+              %{hosts}
+            </section>
+
+            %{sections}
+          </div><!-- container -->
+        </body>
+      </html>
+    }.strip,
+
     all: %{
-      <table class='table table-hover'>
+      <table class='table table-sm table-hover'>
         <thead>
-          <tr>%s</tr>
+          <tr>%{cols}</tr>
         </thead>
 
         <tbody>
-          %s
+          %{rows}
         </tbody>
       </table>
     }.strip,
 
     col: %{
-      <th>%s</th>
+      <th>%{name|h}</th>
     }.strip,
 
     row: %{
-      <tr>%s</tr>
+      <tr>%{row}</tr>
     }.strip,
 
     cell: %{
-      <td>%s</td>
+      <td>%{text|h}</td>
+    }.strip,
+
+    svg_title: %{
+      Speed Test Results (Systems: %{arch|h}, Algorithm: %{algo|h})
     }.strip,
 
     svg: %{
-      <p><img
-        src="%s"
-        width="100%%"
-        height="auto"
-        title="%s"
-        alt="%s"
-      /></p>
+      <img
+        src='%{path|h}'
+        class='img-fluid'
+        title='%{name|h}'
+        alt='%{name|h}'
+      />
     }.strip,
-  }.freeze
 
+    link: %{
+      <li>
+        <a href='%{href|h}' title='%{title|h}'>
+          %{text|h}
+        </a>
+      </li>
+    }.strip,
+
+    section: %{
+      <section>
+        <h2>Results: %{name|h}</h2>
+        %{text}
+        %{svgs}
+      </section>
+    }.strip,
+  })
+
+  #
+  # Background process mixin.
+  #
   module BG
     #
     # Generate SSH command.
@@ -151,8 +262,8 @@ module PiBench
     end
 
     #
-    # Spawn background task that writes output to given file and return
-    # the PID.
+    # Spawn background task that writes standard output to given file
+    # and return the PID.
     #
     def bg(out, cmd)
       @log.debug('bg') do
@@ -171,9 +282,15 @@ module PiBench
     end
   end
 
+  #
+  # Process a map of hosts to background command queues in parallel.
+  #
   class HostQueue
     include BG
 
+    #
+    # Allow singleton invocation.
+    #
     def self.run(log, queues)
       new(log, queues).run
     end
@@ -184,8 +301,8 @@ module PiBench
     end
 
     #
-    # Run until all commands have been run successfully on all hosts, or
-    # until any command on any host fails.
+    # Block until all commands have been run successfully on all hosts,
+    # or until any command on any host fails.
     #
     def run
       @queues.keys.each do |host|
@@ -310,11 +427,14 @@ module PiBench
       spawn_benchmarks
 
       # generate CSVs, SVGs, and HTML fragments, wait for all to
-      # complete
-      save(parse_data)
+      # complete, and return HTML fragments by section
+      html = save(parse_data).merge({
+        # generate hosts.csv and hosts html
+        hosts: make_hosts,
+      })
 
-      # generate hosts.{html,csv}
-      save_hosts.each { |t| t.join }
+      # save index.html
+      save_index_html(html)
     end
 
     private
@@ -334,19 +454,21 @@ module PiBench
     end
 
     #
-    # Spawn benchmarks in background and return a list of PIDs.
+    # Spawn benchmark tasks in background and block until they are
+    # complete.
     #
     def spawn_benchmarks
       # build map of hosts to commands
-      queues = @config['hosts'].reduce(Hash.new do |h, k|
-        h[k] = []
-      end) do |r, row|
-        TESTS.reduce(r) do |r, test|
+      queues = Hash.new { |h, k| h[k] = [] }
+
+      # populate map
+      @config['hosts'].each do |row|
+        TESTS.each do |test|
           case test[:type]
           when 'algos'
             # queue test command for each algorithm
-            (@config['algos'] || ALGOS).reduce(r) do |r, algo|
-              r[row['host']] << {
+            (@config['algos'] || ALGOS).each do |algo|
+              queues[row['host']] << {
                 cmd: [*test[:exec], algo],
                 out: '%s/hosts/%s/%s-%s.txt' % [
                   out_dir,
@@ -355,12 +477,10 @@ module PiBench
                   algo,
                 ],
               }
-
-              r
             end
           else
             # queue command for test
-            r[row['host']] << {
+            queues[row['host']] << {
               cmd: test[:exec],
               out: '%s/hosts/%s/%s.txt' % [
                 out_dir,
@@ -368,13 +488,11 @@ module PiBench
                 test[:name],
               ]
             }
-
-            r
           end
         end
       end
 
-      # block until all tasks have exited
+      # block until all task queues have completed successfully
       HostQueue.run(@log, queues)
     end
 
@@ -408,30 +526,23 @@ module PiBench
 
             # walk block sizes
             SIZES.each_with_index do |size, i|
-              [{
-                algo: 'all',
-                arch: 'all',
-              }, {
-                algo: algo,
-                arch: 'all',
-              }, {
-                algo: 'all',
-                arch: arch,
-              }, {
-                algo: algo,
-                arch: arch,
-              }].each do |agg|
+              4.times.map { |j|
+                {
+                  algo: ((j & 1) != 0) ? 'all' : algo,
+                  arch: ((j & 2) != 0) ? 'all' : arch,
+                }
+              }.each do |agg|
                 val = vals[i + 3].to_f
                 max = r[agg[:arch]][agg[:algo]][:max]
                 r[agg[:arch]][agg[:algo]][:max] = val if val > max
 
-                r[agg[:arch]][agg[:algo]][:rows] << if agg[:algo] == 'all'
+                r[agg[:arch]][agg[:algo]][:rows] << (if agg[:algo] == 'all'
                   # build row for all-*.csv
                   [row['name'], algo, size, val]
                 else
                   # row for algo-specific CSV
                   [row['name'], size, val]
-                end
+                end)
               end
             end
           end
@@ -442,168 +553,225 @@ module PiBench
     end
 
     #
-    # Generate CSVs, SVGs, and HTML fragments, then wait for them all
-    # to complete.
+    # Generate CSVs, SVGs, and HTML fragments, then return map of arch
+    # to HTML fragments.
     #
-    def save(all_data, &block)
-      # build svg lut
-      svgs = Hash.new { |h, k| h[k] = [] }
+    def save(all_data)
+      save_csvs(all_data)
+      svgs = save_svgs(all_data)
+      make_html(svgs)
+    end
 
-      # generate csvs and svgs, then wait for them to complete
-      join('save', all_data.reduce([]) do |r, pair|
-        arch, algo_hash = pair
-
-        algo_hash.reduce(r) do |r, pair|
-          algo, data = pair
-
-          # save csv
-          csv_path = save_csv(arch, algo, data[:rows])
-
-          if algo != 'all'
-            # start building svg
-            max = get_max_value(all_data, arch, algo)
-            row = save_svg(arch, algo, max, csv_path)
-            r << row[:pid]
-
-            # add to svg lut
-            svgs[arch] << {
-              algo: algo,
-              svg: row[:svg],
-              title: row[:title],
-            }
-          end
-
-          # return pids
-          r
+    #
+    # Save all CSVs.
+    #
+    def save_csvs(all_data)
+      all_data.each do |arch, algos|
+        algos.each do |algo, data|
+          save_csv(
+            '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
+            COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
+            data[:rows]
+          )
         end
-      end)
+      end
+    end
 
-      # generate html fragments for svgs
-      save_html(svgs)
+    #
+    # Save SVGs and return a lut of arch to svgs.
+    #
+    def save_svgs(all_data)
+      pids = []
+      svgs = Hash.new { |h, k| h[k] = [] }
+      # generate svgs
+      data = all_data.keys.each do |arch|
+        # omit algo=all svgs because they are too large
+        all_data[arch].keys.select { |algo|
+          algo != 'all'
+        }.each do |algo|
+          # get rows
+          rows = all_data[arch][algo][:rows]
+
+          # get maximum value for plot
+          max = get_max_value(all_data, arch, algo)
+
+          # build svg data
+          svg = make_svg(arch, algo, max, rows)
+
+          # add to svg lut
+          svgs[arch] << {
+            algo: algo,
+            path: svg[:path],
+            title: svg[:title],
+          }
+
+          # save in background and add pid list of pids
+          pids << save_svg(svg)
+        end
+      end
+
+      # wait for background tasks to complete
+      join('save_svgs', pids)
+
+      # return svg data lut
+      svgs
     end
 
     #
     # Generate HTML fragments for each architecture.
     #
-    def save_html(svgs)
-      svgs.each do |arch, rows|
-        # build path to html fragment
-        path = '%s/html/%s.html' % [out_dir, arch]
-
-        # write html
-        File.write(path, rows.sort { |a, b|
-          a[:svg] <=> b[:svg]
+    def make_html(svgs)
+      svgs.keys.reduce({}) do |r, arch|
+        r[arch] = svgs[arch].sort { |a, b|
+          a[:path] <=> b[:path]
         }.map { |row|
-          svg_path = '../svgs/%s' % [File.basename(row[:svg])]
-          HTML[:svg] % [svg_path, row[:title], row[:title]]
-        }.join)
+          TEMPLATES[:svg].run({
+            path: 'svgs/%s' % [File.basename(row[:path])],
+            name: row[:title],
+          })
+        }.join
+
+        r
       end
     end
 
     #
-    # Generate CSV and HTML table of hosts and return array of threads.
+    # Generate CSV and HTML table of hosts and return generated HTML.
     #
-    def save_hosts
-      [save_hosts_csv, save_hosts_html]
+    def make_hosts
+      save_hosts_csv
+      make_hosts_html
     end
 
     #
     # Generate out/csvs/hosts.csv and return thread.
     #
     def save_hosts_csv
-      Thread.new do
-        # build csv path
-        path = '%s/csvs/hosts.csv' % [out_dir]
-
-        # save CSV
-        CSV.open(path, 'wb') do |csv|
-          # write headers
-          csv << COLS[:hosts].map { |col| col[:name] }
-
-          # write rows
-          @config['hosts'].each do |row|
-            csv << COLS[:hosts].map { |col| row[col[:id]] }
-          end
-        end
-      end
+      save_csv(
+        '%s/csvs/hosts.csv' % [out_dir],
+        COLS[:hosts].map { |col| col[:name] },
+        @config['hosts'].map { |row|
+          COLS[:hosts].map { |col| row[col[:id]] }
+        }
+      )
     end
 
     #
-    # Generate out/html/hosts.html and return thread.
+    # Generate and return hosts HTML.
     #
-    def save_hosts_html
-      Thread.new do
-        # build html path
-        path = '%s/html/hosts.html' % [out_dir]
+    def make_hosts_html
+      TEMPLATES[:all].run({
+        cols: COLS[:hosts].map { |col|
+          TEMPLATES[:col].run(col)
+        }.join,
 
-        # generate and save html
-        File.write(path, HTML[:all] % [
-          COLS[:hosts].map { |col|
-            HTML[:col] % [col[:name]]
-          }.join,
-
-          @config['hosts'].map { |row|
-            HTML[:row] % [COLS[:hosts].map { |col|
-              HTML[:cell] % [row[col[:id]]]
-            }.join]
-          }.join,
-        ])
-      end
+        rows: @config['hosts'].map { |row|
+          path = '%s/hosts/%s/version.txt' % [out_dir, row['name']]
+          row.merge({
+            'openssl' => File.read(path).strip,
+          })
+        }.map { |row|
+          TEMPLATES[:row].run({
+            row: COLS[:hosts].map { |col|
+              TEMPLATES[:cell].run({
+                text: row[col[:id]]
+              })
+            }.join
+          })
+        }.join,
+      })
     end
 
     #
-    # save CSV of rows.
+    # Generate and write out/index.html.
     #
-    def save_csv(arch, algo, rows)
-      # build path to output csv
-      csv_path = '%s/csvs/%s-%s.csv' % [out_dir, arch, algo]
+    def save_index_html(html)
+      File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
+        title: 'OpenSSL Benchmark Results',
+        hosts: html[:hosts],
 
-      # write csv
-      CSV.open(csv_path, 'wb') do |csv|
-        # write column headers
-        csv << COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] }
+        links: LINKS.map { |row|
+          TEMPLATES[:link].run(row)
+        }.join,
+
+        sections: %i{all arm x86}.map { |arch|
+          TEMPLATES[:section].run({
+            svgs: html[arch.to_s],
+          }.merge(ARCHS[arch]))
+        }.join,
+      }))
+    end
+
+    #
+    # Save CSV file.
+    #
+    def save_csv(path, cols, rows)
+      CSV.open(path, 'wb') do |csv|
+        # write headers
+        csv << cols
 
         # write rows
         rows.each do |row|
           csv << row
         end
       end
-
-      # return csv path
-      csv_path
     end
 
     #
-    # Render CSV as SVG in background and return SVG and PID.
+    # Build data for SVG.
     #
-    def save_svg(arch, algo, max, csv_path)
-      plot_path = '%s/plot.py' % [__dir__]
-      svg_path = '%s/svgs/%s-%s.svg' % [out_dir, arch, algo]
-
-      # make chart title
-      title = ARCH_TITLES[arch.intern] % [algo]
-
-      # calculate xlimit (round up to nearest 100)
-      # xlimit = ((algo =~ /^aes/) ? 400 : 2000).to_s
-      xlimit = (max / (1048576 * 50.0)).ceil * 50
-
-      # build plot command
-      plot_cmd = [
-        '/usr/bin/python3',
-        plot_path,
-        csv_path,
-        svg_path,
-        title,
-        xlimit.to_s,
-      ]
-
-      # return svg path and pid
+    def make_svg(arch, algo, max, rows)
       {
-        # create svg in background
-        pid: bg('/dev/null', plot_cmd),
-        svg: svg_path,
-        title: title,
+        # build output path
+        path: '%s/svgs/%s-%s.svg' % [out_dir, arch, algo],
+
+        # build title
+        title: TEMPLATES[:svg_title].run({
+          arch: ARCHS[arch.intern][:name],
+          algo: algo,
+        }),
+
+        # output image size (in inches)
+        size: [6.4 * 2, 4.8 * 2],
+
+        # output image DPI
+        dpi: 100,
+
+        # font sizes (in points)
+        fontsize: {
+          yticks: 10,
+          title:  14,
+        },
+
+        # calculate xlimit (round up to nearest 50)
+        xlimit: (max / (1048576 * 50.0)).ceil * 50,
+        xlabel: 'Speed (MB/s)',
+
+        # rows (sorted in reverse order)
+        rows: rows.map { |row|
+          [
+            '%s (%d bytes)' % [row[0], row[1].to_i],
+            row[2].to_f / 1048576,
+          ]
+        }.reverse,
       }
+    end
+
+    #
+    # Render SVG in background and return SVG path, title, and PID.
+    #
+    def save_svg(svg)
+      # invoke plot in background, return pid
+      bg('/dev/null', [
+        # absolute path to python
+        '/usr/bin/python3',
+
+        # build path to plot.py
+        '%s/plot.py' % [__dir__],
+
+        # build chart json data
+        JSON.unparse(svg),
+      ])
     end
 
     #
@@ -666,6 +834,7 @@ module PiBench
       @config['out_dir']
     end
   end
+
   #
   # Allow one-shot invocation.
   #

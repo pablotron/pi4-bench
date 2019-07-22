@@ -14,19 +14,19 @@ hosts:
     arch: "armv6l"
     pi:   true
 
-  - name: "pi3b-peach" 
-    host: "peach" 
+  - name: "pi3b-pecan"
+    host: "pecan"
     text: "Raspberry Pi 3 Model B"
     arch: "armv7l"
     pi:   true
 
-  - name: "pi3b+-pecan" 
-    host: "pecan" 
+  - name: "pi3b+-peach"
+    host: "peach"
     text: "Raspberry Pi 3 Model B+"
     arch: "armv7l"
     pi:   true
 
-  - name: "pi4b-cherry" 
+  - name: "pi4b-cherry"
     host: "cherry"
     text: "Raspberry Pi 4 Model B"
     arch: "armv7l"
@@ -34,7 +34,7 @@ hosts:
 
   - name: "i78650u-flex"
     host: "flex"
-    text: "Intel i7-8650U"
+    text: "Intel i7-8650U (Lenovo X1 Carbon 6th Gen)"
     arch: "amd64"
     pi:   false
 
