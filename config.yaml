@@ -1,6 +1,6 @@
 ---
-# log level
-log_level: "debug"
+# log level (optional, defaults to "info")
+# log_level: "debug"
 
 # path to output directory
 out_dir: "out"
@@ -49,3 +49,13 @@ hosts:
     text: "AMD Ryzen Threadripper 1950X"
     arch: "amd64"
     pi:   false
+
+# list of algorithms to test (optional)
+# algos:
+#   - blake2b512
+#   - blake2s256
+#   - sha256
+#   - sha512
+#   - aes-128-cbc
+#   - aes-192-cbc
+#   - aes-256-cbc
