@@ -89,15 +89,27 @@ module PiBench
     hosts: [{
       id:   'name',
       name: 'Name',
-    }, {
-      id:   'arch',
-      name: 'Architecture',
+      tip:  'System name.',
     }, {
       id:   'text',
       name: 'Description',
+      tip:  'System description.',
+    }, {
+      id:   'architecture',
+      name: 'Architecture',
+      tip:  'Processor architecture.',
+    }, {
+      id:   'mhz',
+      name: 'Speed (MHz)',
+      tip:  'Maximum CPU speed, in MHz.',
+    }, {
+      id:   'aes',
+      name: 'AES?',
+      tip:  'Does this CPU have hardware-accelerated AES instructions?',
     }, {
       id:   'openssl',
       name: 'OpenSSL Version',
+      tip:  'OpenSSL version.',
     }],
   }.freeze
 
@@ -106,7 +118,7 @@ module PiBench
   #
   ARCHS = {
     all: {
-      name: 'All Systems',
+      name: 'All System',
       text: %{
         <p>
           OpenSSL speed test results by algorithm across all systems.
@@ -123,7 +135,7 @@ module PiBench
     },
 
     arm: {
-      name: 'Raspberry Pis',
+      name: 'Raspberry Pi',
       text: %{
         <p>
           OpenSSL speed test results by algorithm for Raspberry Pi
@@ -190,7 +202,7 @@ module PiBench
             </ul>
 
             <section>
-              <h2>Systems</h2>
+              <h2>Test System Details</h2>
 
               <p>
                 Test system details.
@@ -214,11 +226,26 @@ module PiBench
         <tbody>
           %{rows}
         </tbody>
+
+        <tfoot>
+          <tr>
+            <td colspan='%{cols|size|h}'>
+              <a
+                href='csvs/hosts.csv'
+                title='Download test system details as a CSV.'
+              >
+                Download
+              </a>
+            </td>
+          </tr>
+        </tfoot>
       </table>
     }.strip,
 
     col: %{
-      <th>%{name|h}</th>
+      <th title='%{tip|h}'>
+        %{name|h}
+      </th>
     }.strip,
 
     row: %{
@@ -226,11 +253,13 @@ module PiBench
     }.strip,
 
     cell: %{
-      <td>%{text|h}</td>
+      <td title='%{tip|h}'>
+        %{text|h}
+      </td>
     }.strip,
 
     svg_title: %{
-      OpenSSL Speed Test Results: %{arch|h}, %{algo|h}
+      %{arch|h} Test Results: %{algo|h}
     }.strip,
 
     svg: %{
@@ -284,7 +313,7 @@ module PiBench
 
     section: %{
       <section>
-        <h2>%{name|h} Results</h2>
+        <h2>%{name|h} Test Results</h2>
         %{text}
         %{svgs}
       </section>
@@ -438,8 +467,103 @@ module PiBench
     end
   end
 
+  class Parser
+    def self.run(model)
+      new(model).run
+    end
+
+    def initialize(model)
+      @model = model
+    end
+
+    protected
+
+    def out_dir
+      @model.out_dir
+    end
+  end
+
+  #
+  # Parse openssl benchmark data into a nested map of architecture
+  # sets, algorithms, and rows.
+  #
+  class OpenSSLSpeedParser < Parser
+    def run
+      @model.config['hosts'].reduce(Hash.new do |h, k|
+        h[k] = Hash.new do |h2, k2|
+          h2[k2] = { max: 0, rows: [] }
+        end
+      end) do |r, row|
+        # build absolute path to openssl speed data files
+        glob = '%s/hosts/%s/speed-*.txt' % [out_dir, row['name']]
+
+        # parse speed files
+        Dir[glob].each do |path|
+          # get arch
+          arch = row['pi'] ? 'arm' : 'x86'
+
+          # parse file
+          lines = File.readlines(path).select { |line|
+            # match on result rows
+            line =~ /^\+F:/
+          }.each do |line|
+            # split to results
+            vals = line.strip.split(':')
+
+            # build algorithm name
+            algo = vals[2].gsub(/\s+/, '-')
+
+            # walk block sizes
+            SIZES.each_with_index do |size, i|
+              4.times.map { |j|
+                {
+                  algo: ((j & 1) != 0) ? 'all' : algo,
+                  arch: ((j & 2) != 0) ? 'all' : arch,
+                }
+              }.each do |agg|
+                val = vals[i + 3].to_f
+                max = r[agg[:arch]][agg[:algo]][:max]
+                r[agg[:arch]][agg[:algo]][:max] = val if val > max
+
+                r[agg[:arch]][agg[:algo]][:rows] << (if agg[:algo] == 'all'
+                  # build row for all-*.csv
+                  [row['name'], algo, size, val]
+                else
+                  # row for algo-specific CSV
+                  [row['name'], size, val]
+                end)
+              end
+            end
+          end
+        end
+
+        r
+      end
+    end
+  end
+
+  #
+  # Parse OpenSSL version data into a map of host to version.
+  #
+  class OpenSSLVersionParser < Parser
+    def run
+      @model.config['hosts'].reduce({}) do |r, row|
+        r[row['name']] = File.read('%s/hosts/%s/version.txt' % [
+          out_dir,
+          row['name'],
+        ]).strip.split(/\s+/)[1]
+
+        r
+      end
+    end
+  end
+
   class Runner
     include BG
+
+    attr_reader :config
+    attr_reader :log
+    attr_reader :data
 
     #
     # Allow one-shot invocation.
@@ -476,6 +600,13 @@ module PiBench
 
       # save index.html
       save_index_html(html)
+    end
+
+    #
+    # Get output directory.
+    #
+    def out_dir
+      @config['out_dir']
     end
 
     private
@@ -537,60 +668,8 @@ module PiBench
       HostQueue.run(@log, queues)
     end
 
-    #
-    # Parse openssl benchmark data into a map of algorithm => rows
-    #
     def parse_data
-      @config['hosts'].reduce(Hash.new do |h, k|
-        h[k] = Hash.new do |h2, k2|
-          h2[k2] = { max: 0, rows: [] }
-        end
-      end) do |r, row|
-        # build absolute path to openssl speed data files
-        glob = '%s/hosts/%s/speed-*.txt' % [out_dir, row['name']]
-
-        # parse speed files
-        Dir[glob].each do |path|
-          # get arch
-          arch = row['pi'] ? 'arm' : 'x86'
-
-          # parse file
-          lines = File.readlines(path).select { |line|
-            # match on result rows
-            line =~ /^\+F:/
-          }.each do |line|
-            # split to results
-            vals = line.strip.split(':')
-
-            # build algorithm name
-            algo = vals[2].gsub(/\s+/, '-')
-
-            # walk block sizes
-            SIZES.each_with_index do |size, i|
-              4.times.map { |j|
-                {
-                  algo: ((j & 1) != 0) ? 'all' : algo,
-                  arch: ((j & 2) != 0) ? 'all' : arch,
-                }
-              }.each do |agg|
-                val = vals[i + 3].to_f
-                max = r[agg[:arch]][agg[:algo]][:max]
-                r[agg[:arch]][agg[:algo]][:max] = val if val > max
-
-                r[agg[:arch]][agg[:algo]][:rows] << (if agg[:algo] == 'all'
-                  # build row for all-*.csv
-                  [row['name'], algo, size, val]
-                else
-                  # row for algo-specific CSV
-                  [row['name'], size, val]
-                end)
-              end
-            end
-          end
-        end
-
-        r
-      end
+      OpenSSLSpeedParser.run(self)
     end
 
     #
@@ -706,7 +785,11 @@ module PiBench
         '%s/csvs/hosts.csv' % [out_dir],
         COLS[:hosts].map { |col| col[:name] },
         @config['hosts'].map { |row|
-          COLS[:hosts].map { |col| row[col[:id]] }
+          row.merge(get_host_data(row['name']))
+        }.map { |row|
+          COLS[:hosts].map { |col| 
+            row[col[:id]] || row[col[:id].intern]
+          }
         }
       )
     end
@@ -721,15 +804,13 @@ module PiBench
         }.join,
 
         rows: @config['hosts'].map { |row|
-          path = '%s/hosts/%s/version.txt' % [out_dir, row['name']]
-          row.merge({
-            'openssl' => File.read(path).strip,
-          })
+          row.merge(get_host_data(row['name']))
         }.map { |row|
           TEMPLATES[:row].run({
             row: COLS[:hosts].map { |col|
               TEMPLATES[:cell].run({
-                text: row[col[:id]]
+                tip:  col[:tip] || '',
+                text: row[col[:id]] || row[col[:id].intern]
               })
             }.join
           })
@@ -737,12 +818,60 @@ module PiBench
       })
     end
 
+    def get_host_data(host)
+      @host_data ||= {}
+
+      unless @host_data.key?(host)
+        lscpu = get_host_lscpu(host)
+        @host_data[host] = lscpu.merge({
+          mhz: (lscpu['cpu-max-mhz'] || lscpu['cpu-mhz']).to_f.round,
+          aes: lscpu['flags'] =~ /aes/ ? 'Yes' : 'No',
+          openssl: get_host_openssl_version(host),
+        }).tap do |data|
+          @log.debug('get_host_data') do
+            JSON.unparse({
+              host: host,
+              data: data,
+            })
+          end
+        end
+      end
+
+      @host_data[host]
+    end
+
+    def get_host_openssl_version(host)
+      File.read('%s/hosts/%s/version.txt' % [
+        out_dir,
+        host,
+      ]).strip.split(/\s+/)[1]
+    end
+
+    #
+    # Parse host lscpu output.
+    #
+    def get_host_lscpu(host)
+      path = '%s/hosts/%s/lscpu.txt' % [out_dir, host]
+
+      File.readlines(path).reduce({}) do |r, line|
+        row = line.strip.split(/:\s+/)
+        key = row[0].downcase
+                .gsub(/\(s\)/, 's')
+                .gsub(/[^a-z0-9-]+/, '-')
+                .gsub(/--/, '-')
+
+        r[key] = row[1]
+
+        r
+      end
+    end
+
     #
     # Generate and write out/index.html.
     #
     def save_index_html(html)
       File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
-        title: 'OpenSSL Benchmark Results',
+        title: 'OpenSSL Speed Test Results',
         hosts: html[:hosts],
 
         links: LINKS.map { |row|
@@ -881,19 +1010,14 @@ module PiBench
         raise err
       end
     end
-
-    #
-    # Get output directory.
-    #
-    def out_dir
-      @config['out_dir']
-    end
   end
 
   #
   # Allow one-shot invocation.
   #
   def self.run(app, args)
+    Luigi::FILTERS[:size] = proc { |v| v.size }
+
     # check command-line arguments
     unless config_path = args.shift
       raise "Usage: #{app} config.yaml"
