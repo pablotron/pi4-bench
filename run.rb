@@ -113,17 +113,11 @@ module PiBench
         </p>
 
         <p>
-          Note: The CPUs in the x86-64 systems include <a
+          Note: The x86-64 CPUs have <a
             href='https://en.wikipedia.org/wiki/AES_instruction_set'
             title='Intel AES-NI instructions.'
-          >AES hardware acceleration instructions (AES-NI)</a>, and the
-          CPUs in the Raspberry Pi systems do not.
-        </p>
-
-        <p>
-          In other words, AES results should only be interpreted as the
-          speed at which the given CPU can perform AES operations, and
-          not as a cross-architecture processing power comparison.
+          >hardware-accelerated AES (AES-NI)</a>, and the
+          Raspberry Pi CPUs do not.
         </p>
       }.strip,
     },
@@ -236,7 +230,7 @@ module PiBench
     }.strip,
 
     svg_title: %{
-      OpenSSL Test Speed Results: %{arch|h}, %{algo|h}
+      OpenSSL Speed Test Results: %{arch|h}, %{algo|h}
     }.strip,
 
     svg: %{
@@ -290,7 +284,7 @@ module PiBench
 
     section: %{
       <section>
-        <h2>Results: %{name|h}</h2>
+        <h2>%{name|h} Results</h2>
         %{text}
         %{svgs}
       </section>
