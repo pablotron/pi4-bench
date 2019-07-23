@@ -2,6 +2,9 @@
 # log level (optional, defaults to "info")
 # log_level: "debug"
 
+# log path (optional, defaults to STDERR)
+# log_path: 'p4-bench.log'
+
 # path to output directory
 out_dir: "out"
 

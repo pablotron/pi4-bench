@@ -1,12 +1,12 @@
 #!/usr/bin/env ruby
 
 #
-# run.rb: Benchmark OpenSSL ciphers on several systems, then do
+# run.rb: Run OpenSSL speed tests on several systems, then do
 # the following:
 #
-#   * aggregate the results as CSV files
-#   * create SVG charts of the results
-#   * generate HTML fragments for the SVG results
+#   * Aggregate results as CSV files
+#   * Create SVG charts of the results
+#   * Generate HTML summary of results.
 #
 # Usage: ./run.rb config.yaml
 #
@@ -20,6 +20,12 @@ require 'logger'
 require 'json'
 require 'luigi-template'
 
+#
+# Run OpenSSL speed tests on several systems, then generate HTML, SVG,
+# and CSV results.
+#
+# Use PiBench.run for command-line invocation.
+#
 module PiBench
   # block sizes
   SIZES = %w{16 64 256 1024 8192 16384}
@@ -42,8 +48,9 @@ module PiBench
   #
   # Default list of EVP algorithms.
   #
-  # removed sha3-256 because it is not supported in older versions of
-  # openssl
+  # (Note: sha3-256 because it is not supported in older versions of
+  # openssl)
+  #
   ALGOS = %w{
     blake2b512
     blake2s256
@@ -155,6 +162,9 @@ module PiBench
     },
   }.freeze
 
+  #
+  # Links in introduction of index.html.
+  #
   LINKS = [{
     href:   'csvs/all-all.csv',
     title:  'Download all results as a CSV file.',
@@ -165,6 +175,9 @@ module PiBench
     text:   'GitHub Page',
   }].freeze
 
+  #
+  # Template cache.  Used to generate index.html.
+  #
   TEMPLATES = Luigi::Cache.new({
     index: %{
       <!DOCTYPE html>
@@ -288,6 +301,9 @@ module PiBench
     }.strip,
   })
 
+  #
+  # Utility methods.
+  #
   module Util
     #
     # Save CSV file.
@@ -340,6 +356,7 @@ module PiBench
         })
       end
 
+      # run background task
       spawn(*cmd,
         in: '/dev/null',
         out: out,
@@ -348,6 +365,7 @@ module PiBench
       )
     end
   end
+
 
   #
   # Process a map of hosts to background command queues in parallel.
@@ -362,7 +380,10 @@ module PiBench
       new(log, queues).run
     end
 
-    def initialize(log, queues)
+    #
+    # Create a new instance.
+    #
+    def initialize(log, queues = {})
       @log, @queues = log, queues
       @pids = {}
     end
@@ -372,12 +393,15 @@ module PiBench
     # or until any command on any host fails.
     #
     def run
+      # start initial per-host tasks
       @queues.keys.each do |host|
         drain(host)
       end
 
+      # loop until all tasks have been completed
       until done?
         @log.debug('HostQueue#run') do
+          # log state
           'Process.wait(): %s ' % [JSON.unparse({
             pids: @pids,
             queues: @queues,
@@ -391,8 +415,8 @@ module PiBench
         # map pid to host
         if host = @pids.delete(pid)
           if st.success?
-            # log success
             @log.debug('HostQueue#run') do
+              # log success
               'command done: %s' % [JSON.unparse({
                 host: host,
                 pid:  pid,
@@ -459,6 +483,9 @@ module PiBench
       nil
     end
 
+    #
+    # Are all running and pending tasks complete?
+    #
     def done?
       @pids.size == 0 && @queues.keys.all? { |k| @queues[k].size == 0 }
     end
@@ -491,24 +518,33 @@ module PiBench
   # Fetch any needed data.
   #
   class DataFetcher < Runnable
+    #
+    # Create output directories and fetch any data, if needed.
+    #
     def run
-      make_output_dirs
+      # create output directories
+      make_dirs
+
+      # fetch any pending data
       fetch_data
     end
 
     private
 
+    # output directories
+    OUT_DIRS = %w{html csvs svgs}
+
     #
-    # Create output directories
+    # Create output directories.
     #
-    def make_output_dirs
-      dirs = (%w{html csvs svgs} + @model.config['hosts'].map { |row|
+    def make_dirs
+      dirs = (OUT_DIRS + @model.config['hosts'].map { |row|
         'hosts/%s' % [row['name']]
       }).map { |dir|
         '%s/%s' % [out_dir, dir]
       }
 
-      @model.log.debug('make_output_dirs') { JSON.unparse(dirs) }
+      @model.log.debug('make_dirs') { JSON.unparse(dirs) }
       FileUtils.mkdir_p(dirs)
     end
 
@@ -516,7 +552,7 @@ module PiBench
     # Spawn tasks in background and block until they are complete.
     #
     def fetch_data
-      # build map of hosts to commands
+      # build map of hosts to task lists
       queues = Hash.new { |h, k| h[k] = [] }
 
       # populate map
@@ -555,78 +591,88 @@ module PiBench
     end
   end
 
+  #
+  # Data parsers.
+  #
   module Parsers
     #
-    # Parse openssl benchmark data into a nested map of architecture
-    # sets, algorithms, and rows.
+    # Namespace for OpenSSL data parsers.
     #
-    class OpenSSLSpeedParser < Runnable
-      def run
-        @model.config['hosts'].reduce(Hash.new do |h, k|
-          h[k] = Hash.new do |h2, k2|
-            h2[k2] = { max: 0, rows: [] }
-          end
-        end) do |r, row|
-          # build absolute path to openssl speed data files
-          glob = '%s/hosts/%s/speed-*.txt' % [out_dir, row['name']]
+    module OpenSSL
+      #
+      # Parse openssl benchmark data into a nested map of architecture
+      # sets, algorithms, and rows.
+      #
+      class SpeedParser < Runnable
+        def run
+          @model.config['hosts'].reduce(Hash.new do |h, k|
+            h[k] = Hash.new do |h2, k2|
+              h2[k2] = { max: 0, rows: [] }
+            end
+          end) do |r, row|
+            # build absolute path to openssl speed data files
+            glob = '%s/hosts/%s/speed-*.txt' % [out_dir, row['name']]
 
-          # parse speed files
-          Dir[glob].each do |path|
-            # get arch
-            arch = row['pi'] ? 'arm' : 'x86'
+            # parse speed files
+            Dir[glob].each do |path|
+              # get arch
+              arch = row['pi'] ? 'arm' : 'x86'
 
-            # parse file
-            File.readlines(path).select { |line|
-              # match on result rows
-              line =~ /^\+F:/
-            }.each do |line|
-              # split to results
-              vals = line.strip.split(':')
+              # parse file
+              File.readlines(path).select { |line|
+                # match on result rows
+                line =~ /^\+F:/
+              }.each do |line|
+                # split to results
+                vals = line.strip.split(':')
 
-              # build algorithm name
-              algo = vals[2].gsub(/\s+/, '-')
+                # build algorithm name
+                algo = vals[2].gsub(/\s+/, '-')
 
-              # walk block sizes
-              SIZES.each_with_index do |size, i|
-                4.times.map { |j|
-                  {
-                    algo: ((j & 1) != 0) ? 'all' : algo,
-                    arch: ((j & 2) != 0) ? 'all' : arch,
-                  }
-                }.each do |agg|
-                  val = vals[i + 3].to_f
-                  max = r[agg[:arch]][agg[:algo]][:max]
-                  r[agg[:arch]][agg[:algo]][:max] = val if val > max
+                # walk block sizes
+                SIZES.each_with_index do |size, i|
+                  4.times.map { |j|
+                    {
+                      algo: ((j & 1) != 0) ? 'all' : algo,
+                      arch: ((j & 2) != 0) ? 'all' : arch,
+                    }
+                  }.each do |agg|
+                    agg_arch, agg_algo = agg[:arch], agg[:algo]
 
-                  r[agg[:arch]][agg[:algo]][:rows] << (if agg[:algo] == 'all'
-                    # build row for all-*.csv
-                    [row['name'], algo, size, val]
-                  else
-                    # row for algo-specific CSV
-                    [row['name'], size, val]
-                  end)
+                    val = vals[i + 3].to_f
+                    max = r[agg_arch][agg_algo][:max]
+                    r[agg_arch][agg_algo][:max] = val if val > max
+
+                    r[agg_arch][agg_algo][:rows] << (if agg_algo == 'all'
+                      # build row for all-*.csv
+                      [row['name'], algo, size, val]
+                    else
+                      # row for algo-specific CSV
+                      [row['name'], size, val]
+                    end)
+                  end
                 end
               end
             end
-          end
 
-          r
+            r
+          end
         end
       end
-    end
 
-    #
-    # Parse OpenSSL version data into a map of host to version.
-    #
-    class OpenSSLVersionParser < Runnable
-      def run
-        @model.config['hosts'].reduce({}) do |r, row|
-          r[row['name']] = File.read('%s/hosts/%s/version.txt' % [
-            out_dir,
-            row['name'],
-          ]).strip.split(/\s+/)[1]
+      #
+      # Parse OpenSSL version data into a map of host to version.
+      #
+      class VersionParser < Runnable
+        def run
+          @model.config['hosts'].reduce({}) do |r, row|
+            r[row['name']] = File.read('%s/hosts/%s/version.txt' % [
+              out_dir,
+              row['name'],
+            ]).strip.split(/\s+/)[1]
 
-          r
+            r
+          end
         end
       end
     end
@@ -658,6 +704,9 @@ module PiBench
 
       private
 
+      #
+      # Normalize an lscpu key.
+      #
       def make_key(s)
         s.downcase
           .gsub(/\(s\)/, 's')
@@ -666,7 +715,14 @@ module PiBench
       end
     end
 
+    #
+    # Parse speed data and build an architecture to SVGs map.
+    #
     class SVGDataParser < Runnable
+      #
+      # Build an architecture to SVG list to generate from the
+      # previously-loaded speed data.
+      #
       def run
         svgs = Hash.new { |h, k| h[k] = [] }
 
@@ -697,7 +753,8 @@ module PiBench
       private
 
       #
-      # Build data for SVG.
+      # Build data for SVG.  This data is serialized as JSON and passed
+      # to `plot.py` to generate an SVG.
       #
       def make_svg(arch, algo, max, rows)
         {
@@ -782,24 +839,19 @@ module PiBench
     attr_reader :cpus
     attr_reader :svgs
 
-    def initialize(config)
-      # cache config
-      @config = config
-
-      # get log level
-      log_level = (@config['log_level'] || 'info').upcase
-
-      # create logger and set log level
-      @log = ::Logger.new(STDERR)
-      @log.level = ::Logger.const_get(log_level)
-      @log.debug { "log level = #{log_level}" }
+    #
+    # Create model instance based on given config.
+    #
+    def initialize(config, log)
+      # cache config and log
+      @config, @log = config, log
 
       # fetch data (if needed)
       DataFetcher.run(self)
 
       # load parsed data
-      @speeds = Parsers::OpenSSLSpeedParser.run(self)
-      @versions = Parsers::OpenSSLVersionParser.run(self)
+      @speeds = Parsers::OpenSSL::SpeedParser.run(self)
+      @versions = Parsers::OpenSSL::VersionParser.run(self)
       @cpus = Parsers::CPUInfoParser.run(self)
 
       # render svg data (references data loaded above)
@@ -814,192 +866,250 @@ module PiBench
     end
   end
 
+  #
+  # View namespace.
+  #
   module Views
     #
-    # Save data csvs.
+    # Speed data views namespace.
     #
-    class DataCSVsView < Runnable
-      def run
-        @model.speeds.each do |arch, algos|
-          algos.each do |algo, data|
-            Util.save_csv(
-              '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
-              COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
-              data[:rows]
-            )
+    module Speed
+      #
+      # Save speed data as CSVs.
+      #
+      class CSVView < Runnable
+        #
+        # Save speed data as CSVs.
+        #
+        def run
+          @model.speeds.each do |arch, algos|
+            algos.each do |algo, data|
+              path = '%s/csvs/%s-%s.csv' % [out_dir, arch, algo]
+              cols_key = (algo == 'all') ? :all : :algo
+              cols = COLS[cols_key].map { |col| col[:id] }
+              Util.save_csv(path, cols, data[:rows])
+            end
+          end
+        end
+      end
+
+      #
+      # Save speed data as SVGs.
+      #
+      class SVGView < Runnable
+        include BG
+
+        #
+        # Create an SVGView instance.
+        #
+        def initialize(model)
+          super(model)
+          @log = @model.log
+        end
+
+        #
+        # Save speed data as SVGs.
+        #
+        def run
+          pids = []
+
+          # generate svgs
+          @model.svgs.each do |arch, svgs|
+            svgs.each do |svg|
+              # save in background and add pid list of pids
+              pids << save_svg(svg)
+            end
+          end
+
+          # wait for background tasks to complete
+          join(pids)
+        end
+
+        private
+
+        #
+        # Render SVG in background and return SVG path, title, and PID.
+        #
+        def save_svg(svg)
+          # invoke plot in background, return pid
+          bg('/dev/null', [
+            # absolute path to python
+            '/usr/bin/python3',
+
+            # build path to plot.py
+            '%s/plot.py' % [__dir__],
+
+            # build chart json data
+            JSON.unparse(svg),
+          ])
+        end
+
+        #
+        # Join set of PIDs together.
+        #
+        def join(pids = [])
+          @log.debug('join') { JSON.unparse({ pids: pids }) }
+
+          # wait for all tasks to complete and check for errors
+          errors = pids.reduce([]) do |r, pid|
+            ::Process.wait(pid)
+            $?.success? ? r : (r << pid)
+          end
+
+          # check for errors
+          if errors.size > 0
+            # build error message
+            err = 'failed PIDs: %s' % [JSON.unparse(errors)]
+
+            # log and raise error
+            @log.fatal('join') { err }
+            raise err
           end
         end
       end
     end
 
-    class SVGView < Runnable
-      include BG
-
-      def initialize(model)
-        super(model)
-        @log = @model.log
-      end
-
-      def run
-        pids = []
-
-        # generate svgs
-        @model.svgs.each do |arch, svgs|
-          svgs.each do |svg|
-            # save in background and add pid list of pids
-            pids << save_svg(svg)
-          end
-        end
-
-        # wait for background tasks to complete
-        join(pids)
-      end
-
-      private
-
-      #
-      # Render SVG in background and return SVG path, title, and PID.
-      #
-      def save_svg(svg)
-        # invoke plot in background, return pid
-        bg('/dev/null', [
-          # absolute path to python
-          '/usr/bin/python3',
-
-          # build path to plot.py
-          '%s/plot.py' % [__dir__],
-
-          # build chart json data
-          JSON.unparse(svg),
-        ])
-      end
-
-      #
-      # join set of PIDs together
-      #
-      def join(pids = [])
-        @log.debug('join') { JSON.unparse({ pids: pids }) }
-
-        # wait for all tasks to complete and check for errors
-        errors = pids.reduce([]) do |r, pid|
-          ::Process.wait(pid)
-          $?.success? ? r : (r << pid)
-        end
-
-        # check for errors
-        if errors.size > 0
-          # build error message
-          err = 'failed PIDs: %s' % [JSON.unparse(errors)]
-
-          # log and raise error
-          @log.fatal('join') { err }
-          raise err
-        end
-      end
-    end
-
     #
-    # Generate out/csvs/hosts.csv.
+    # Namespace for hosts views.
     #
-    class HostsCSVView < Runnable
-      def run
-        Util.save_csv(
-          '%s/csvs/hosts.csv' % [out_dir],
-          COLS[:hosts].map { |col| col[:name] },
+    module Hosts
+      #
+      # Abstract parent class for hosts views.
+      #
+      class HostsView < Runnable
+        protected
+
+        #
+        # Get an array of hosts and merge the `lscpu` and OpenSSL version
+        # information for each host.
+        #
+        def hosts
           @model.config['hosts'].map { |row|
             row.merge(@model.cpus[row['name']]).merge({
               openssl: @model.versions[row['name']],
             })
-          }.map { |row|
-            COLS[:hosts].map { |col|
-              row[col[:id]] || row[col[:id].intern]
-            }
           }
-        )
-      end
-    end
-
-    #
-    # Generate HTML for hosts section.
-    #
-    class HostsSectionHTMLView < Runnable
-      def run
-        TEMPLATES[:all].run({
-          cols: COLS[:hosts].map { |col|
-            TEMPLATES[:col].run(col)
-          }.join,
-
-          rows: @model.config['hosts'].map { |row|
-            row.merge(@model.cpus[row['name']]).merge({
-              openssl: @model.versions[row['name']],
-            })
-          }.map { |row|
-            TEMPLATES[:row].run({
-              row: COLS[:hosts].map { |col|
-                TEMPLATES[:cell].run({
-                  tip:  col[:tip] || '',
-                  text: row[col[:id]] || row[col[:id].intern]
-                })
-              }.join
-            })
-          }.join,
-        })
-      end
-    end
-
-    #
-    # Generate HTML fragment for given architecture.
-    #
-    class SVGListHTMLView < Runnable
-      def run(svgs)
-        svgs.sort { |a, b|
-          a[:path] <=> b[:path]
-        }.map { |row|
-          TEMPLATES[:svg].run({
-            path: 'svgs/%s' % [File.basename(row[:path])],
-            name: row[:title],
-          })
-        }.join
-      end
-    end
-
-    #
-    # Generate and write out/index.html.
-    #
-    class IndexHTMLView < Runnable
-      SECTIONS = %i{all arm x86}
-
-      def initialize(model)
-        super(model)
-
-        # create/cache svg list view
-        view = SVGListHTMLView.new(@model)
-
-        # render svg lists as html
-        @html = @model.svgs.reduce({
-          # render hosts section
-          hosts: HostsSectionHTMLView.run(@model),
-        }) do |r, pair|
-          r[pair[0].intern] = view.run(pair[1])
-          r
         end
       end
 
-      def run
-        File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
-          title: 'OpenSSL Speed Test Results',
-          hosts: @html[:hosts],
+      #
+      # Generate csvs/hosts.csv.
+      #
+      class CSVView < HostsView
+        #
+        # Generate csvs/hosts.csv.
+        #
+        def run
+          Util.save_csv(
+            '%s/csvs/hosts.csv' % [out_dir],
+            COLS[:hosts].map { |col| col[:name] },
+            hosts.map { |row|
+              COLS[:hosts].map { |col|
+                row[col[:id]] || row[col[:id].intern]
+              }
+            }
+          )
+        end
+      end
 
-          links: LINKS.map { |row|
-            TEMPLATES[:link].run(row)
-          }.join,
+      #
+      # Generate HTML for hosts section.
+      #
+      class SectionView < HostsView
+        #
+        # Generate HTML for hosts section.
+        #
+        def run
+          TEMPLATES[:all].run({
+            cols: COLS[:hosts].map { |col|
+              TEMPLATES[:col].run(col)
+            }.join,
 
-          sections: SECTIONS.map { |arch|
-            TEMPLATES[:section].run({
-              svgs: @html[arch],
-            }.merge(ARCHS[arch]))
-          }.join,
-        }))
+            rows: hosts.map { |row|
+              TEMPLATES[:row].run({
+                row: COLS[:hosts].map { |col|
+                  TEMPLATES[:cell].run({
+                    tip:  col[:tip] || '',
+                    text: row[col[:id]] || row[col[:id].intern]
+                  })
+                }.join
+              })
+            }.join,
+          })
+        end
+      end
+    end
+
+    #
+    # Namespace for index.html views.
+    #
+    module Index
+      #
+      # Generate HTML fragment for given list of SVGs.
+      #
+      class SVGListView < Runnable
+        #
+        # Generate HTML fragment for given list of SVGs.
+        #
+        def run(svgs)
+          svgs.sort { |a, b|
+            a[:path] <=> b[:path]
+          }.map { |row|
+            TEMPLATES[:svg].run({
+              path: 'svgs/%s' % [File.basename(row[:path])],
+              name: row[:title],
+            })
+          }.join
+        end
+      end
+
+      #
+      # Generate and write out/index.html.
+      #
+      class HTMLView < Runnable
+        # ordered list of sections symbols
+        SECTIONS = %i{all arm x86}
+
+        #
+        # Create a new instance.
+        #
+        def initialize(model)
+          super(model)
+
+          # create/cache svg list view
+          view = SVGListView.new(@model)
+
+          # render svg lists as html
+          @html = @model.svgs.reduce({
+            # render hosts section
+            hosts: Hosts::SectionView.run(@model),
+          }) do |r, pair|
+            r[pair[0].intern] = view.run(pair[1])
+            r
+          end
+        end
+
+        #
+        # Generate and write out/index.html.
+        #
+        def run
+          File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
+            title: 'OpenSSL Speed Test Results',
+            hosts: @html[:hosts],
+
+            # intro links
+            links: LINKS.map { |row|
+              TEMPLATES[:link].run(row)
+            }.join,
+
+            # sections
+            sections: SECTIONS.map { |arch|
+              TEMPLATES[:section].run({
+                svgs: @html[arch],
+              }.merge(ARCHS[arch]))
+            }.join,
+          }))
+        end
       end
     end
 
@@ -1007,24 +1117,28 @@ module PiBench
     # Render everything.
     #
     class FullView < Runnable
+      #
+      # Render everything.
+      #
       def run
-        # generate CSVs
-        DataCSVsView.run(@model)
-        HostsCSVView.run(@model)
+        # generate speed CSVs and SVGs
+        Speed::CSVView.run(@model)
+        Speed::SVGView.run(@model)
 
-        # render svgs, return svg info
-        SVGView.run(@model)
+        # generate csvs/hosts.csv
+        Hosts::CSVView.run(@model)
 
         # save index.html
-        IndexHTMLView.run(@model)
+        Index::HTMLView.run(@model)
       end
     end
   end
 
   #
-  # Allow one-shot invocation.
+  # Allow command-line invocation.
   #
   def self.run(app, args)
+    # add global size filter
     Luigi::FILTERS[:size] = proc { |v| v.size }
 
     # check command-line arguments, get config path
@@ -1032,8 +1146,17 @@ module PiBench
       raise "Usage: #{app} config.yaml"
     end
 
-    # load config, load model
-    model = Model.new(Util.load_config(config_path))
+    # load config
+    config = Util.load_config(config_path)
+
+    # create logger from config
+    log = ::Logger.new(
+      (config['log_path'] || STDERR),
+      level: (config['log_level'] || 'info').intern
+    )
+
+    # create model
+    model = Model.new(config, log)
 
     # render everything
     Views::FullView.run(model)
