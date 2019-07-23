@@ -918,39 +918,20 @@ module PiBench
     end
   end
 
-  class FullView < View
-    def run
-      # generate CSVs
-      DataCSVsView.run(@model)
-      HostsCSVView.run(@model)
-
-      # render svgs, return svg info
-      SVGView.run(@model)
-
-      # create svg lists view
-      view = SVGListHTMLView.new(@model)
-
-      # render svg lists as html
-      html = @model.svgs.reduce({}) do |r, pair|
-        r[pair[0]] = view.run(pair[1])
-        r
-      end
-
-      # render hosts section
-      html[:hosts] = HostsSectionHTMLView.run(@model)
-
-      # save index.html
-      IndexHTMLView.new(@model).run(html)
-    end
-  end
-
   #
   # Generate and write out/index.html.
   #
   class IndexHTMLView < View
     SECTIONS = %i{all arm x86}
 
-    def run(html)
+    def initialize(model)
+      super(model)
+
+      # create/cache svg list view
+      @view = SVGListHTMLView.new(@model)
+    end
+
+    def run
       File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
         title: 'OpenSSL Speed Test Results',
         hosts: html[:hosts],
@@ -961,10 +942,40 @@ module PiBench
 
         sections: SECTIONS.map { |arch|
           TEMPLATES[:section].run({
-            svgs: html[arch.to_s],
+            svgs: html[arch],
           }.merge(ARCHS[arch]))
         }.join,
       }))
+    end
+
+    private
+
+    def html
+      # render svg lists as html
+      @html ||= @model.svgs.reduce({
+        # render hosts section
+        hosts: HostsSectionHTMLView.run(@model),
+      }) do |r, pair|
+        r[pair[0].intern] = @view.run(pair[1])
+        r
+      end
+    end
+  end
+
+  #
+  # Render everything.
+  #
+  class FullView < View
+    def run
+      # generate CSVs
+      DataCSVsView.run(@model)
+      HostsCSVView.run(@model)
+
+      # render svgs, return svg info
+      SVGView.run(@model)
+
+      # save index.html
+      IndexHTMLView.run(@model)
     end
   end
 
