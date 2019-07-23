@@ -831,13 +831,12 @@ module PiBench
   # Fetch any data (if needed) and parse it.
   #
   class Model
-    attr_reader :config
-    attr_reader :log
-
-    attr_reader :speeds
-    attr_reader :versions
-    attr_reader :cpus
-    attr_reader :svgs
+    attr :config,
+         :log,
+         :speeds,
+         :versions,
+         :cpus,
+         :svgs
 
     #
     # Create model instance based on given config.
