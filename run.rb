@@ -320,6 +320,23 @@ module PiBench
     }.strip,
   })
 
+  module Util
+    #
+    # Save CSV file.
+    #
+    def self.save_csv(path, cols, rows)
+      ::CSV.open(path, 'wb') do |csv|
+        # write headers
+        csv << cols
+
+        # write rows
+        rows.each do |row|
+          csv << row
+        end
+      end
+    end
+  end
+
   #
   # Background process mixin.
   #
@@ -558,12 +575,265 @@ module PiBench
     end
   end
 
+  #
+  # Parse lscpu data and return a map of host to cpu info.
+  #
+  class CPUInfoParser < Parser
+    def run
+      @model.config['hosts'].reduce({}) do |r, row|
+        path = '%s/hosts/%s/lscpu.txt' % [out_dir, row['name']]
+
+        r[row['name']] = expand(File.readlines(path).reduce({}) do |hr, line|
+          row = line.strip.split(/:\s+/)
+          hr[make_key(row[0])] = row[1]
+
+          hr
+        end)
+
+        r
+      end
+    end
+
+    private
+
+    def expand(h)
+      h.merge({
+        mhz: (h['cpu-max-mhz'] || h['cpu-mhz']).to_f.round,
+        aes: h['flags'] =~ /aes/ ? 'Yes' : 'No',
+      })
+    end
+
+    def make_key(s)
+      s.downcase
+        .gsub(/\(s\)/, 's')
+        .gsub(/[^a-z0-9-]+/, '-')
+        .gsub(/--/, '-')
+    end
+  end
+
+  class View
+    def self.run(model)
+      new(model).run
+    end
+
+    def initialize(model)
+      @model = model
+    end
+
+    protected
+
+    def out_dir
+      @model.config['out_dir']
+    end
+  end
+
+  #
+  # Save data csvs.
+  #
+  class DataCSVsView < View
+    def run
+      @model.speeds.each do |arch, algos|
+        algos.each do |algo, data|
+          Util.save_csv(
+            '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
+            COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
+            data[:rows]
+          )
+        end
+      end
+    end
+  end
+
+  class SVGView < View
+    include BG
+
+    def initialize(model)
+      super(model)
+      @log = @model.log
+    end
+
+    def run
+      pids = []
+      svgs = Hash.new { |h, k| h[k] = [] }
+
+      # generate svgs
+      @model.speeds.keys.each do |arch|
+        # omit algo=all svgs because they are too large
+        @model.speeds[arch].keys.select { |algo|
+          algo != 'all'
+        }.each do |algo|
+          # get rows
+          rows = @model.speeds[arch][algo][:rows]
+
+          # get maximum value for plot
+          max = get_max_value(arch, algo)
+
+          # build svg data
+          svg = make_svg(arch, algo, max, rows)
+
+          # add to svg lut
+          svgs[arch] << {
+            algo: algo,
+            path: svg[:path],
+            rows: svg[:rows].reverse,
+            title: svg[:title],
+          }
+
+          # save in background and add pid list of pids
+          pids << save_svg(svg)
+        end
+      end
+
+      # wait for background tasks to complete
+      join('save_svgs', pids)
+
+      # return svg data lut
+      svgs
+    end
+
+    private
+
+    #
+    # Build data for SVG.
+    #
+    def make_svg(arch, algo, max, rows)
+      {
+        # build output path
+        path: '%s/svgs/%s-%s.svg' % [out_dir, arch, algo],
+
+        # build title
+        title: TEMPLATES[:svg_title].run({
+          arch: ARCHS[arch.intern][:name],
+          algo: algo,
+        }),
+
+        # output image size (in inches)
+        size: [6.4 * 2, 4.8 * 2],
+
+        # output image DPI
+        dpi: 100,
+
+        # font sizes (in points)
+        fontsize: {
+          yticks: 10,
+          title:  14,
+        },
+
+        # calculate xlimit (round up to nearest 50)
+        xlimit: (max / (1048576 * 50.0)).ceil * 50,
+        xlabel: 'Speed (MB/s)',
+
+        # rows (sorted in reverse order)
+        rows: rows.map { |row|
+          [
+            '%s (%d bytes)' % [row[0], row[1].to_i],
+            (row[2].to_f / 1048576).round(2),
+          ]
+        }.reverse,
+      }
+    end
+
+    #
+    # Render SVG in background and return SVG path, title, and PID.
+    #
+    def save_svg(svg)
+      # invoke plot in background, return pid
+      bg('/dev/null', [
+        # absolute path to python
+        '/usr/bin/python3',
+
+        # build path to plot.py
+        '%s/plot.py' % [__dir__],
+
+        # build chart json data
+        JSON.unparse(svg),
+      ])
+    end
+
+    #
+    # get maximum value depending for chart
+    #
+    def get_max_value(arch, algo)
+      is_aes = is_aes?(algo)
+
+      @model.speeds['all'].keys.select { |k|
+        is_aes == is_aes?(k)
+      }.map { |k|
+        @model.speeds[arch][k][:max]
+      }.reduce(0) { |rm, v|
+        v > rm ? v : rm
+      }
+    end
+
+    #
+    # Is the given algorithm AES?
+    #
+    def is_aes?(algo)
+      @is_aes_cache ||= {}
+      @is_aes_cache[algo] ||= !!(algo =~ /^aes/)
+    end
+
+    #
+    # join set of PIDs together
+    #
+    def join(set_name, pids = [])
+      @log.debug('join') do
+        JSON.unparse({
+          set_name: set_name,
+          pids: pids,
+        })
+      end
+
+      # wait for all tasks to complete and check for errors
+      errors = pids.reduce([]) do |r, pid|
+        ::Process.wait(pid)
+        $?.success? ? r : (r << pid)
+      end
+
+      if errors.size > 0
+        # build error message
+        err = 'pids failed: %s' % [JSON.unparse({
+          set_name: set_name,
+          pids: errors,
+        })]
+
+        # log and raise error
+        @log.fatal('join') { err }
+        raise err
+      end
+    end
+  end
+
+  #
+  # Generate out/csvs/hosts.csv.
+  #
+  class HostsCSVView < View
+    def run
+      Util.save_csv(
+        '%s/csvs/hosts.csv' % [out_dir],
+        COLS[:hosts].map { |col| col[:name] },
+        @model.config['hosts'].map { |row|
+          row.merge(@model.cpus[row['name']]).merge({
+            openssl: @model.versions[row['name']],
+          })
+        }.map { |row|
+          COLS[:hosts].map { |col|
+            row[col[:id]] || row[col[:id].intern]
+          }
+        }
+      )
+    end
+  end
+
   class Runner
     include BG
 
     attr_reader :config
     attr_reader :log
     attr_reader :data
+    attr_reader :speeds
+    attr_reader :versions
+    attr_reader :cpus
 
     #
     # Allow one-shot invocation.
@@ -591,15 +861,19 @@ module PiBench
       # connect to hosts in background, wait for all to complete
       spawn_benchmarks
 
+      # load parsed data
+      @speeds = OpenSSLSpeedParser.run(self)
+      @versions = OpenSSLVersionParser.run(self)
+      @cpus = CPUInfoParser.run(self)
+
       # generate CSVs, SVGs, and HTML fragments, wait for all to
       # complete, and return HTML fragments by section
-      html = save(parse_data).merge({
-        # generate hosts.csv and hosts html
-        hosts: make_hosts,
-      })
+      html = save(@speeds)
 
       # save index.html
-      save_index_html(html)
+      save_index_html(html.merge({
+        hosts: make_hosts_html,
+      }))
     end
 
     #
@@ -668,74 +942,16 @@ module PiBench
       HostQueue.run(@log, queues)
     end
 
-    def parse_data
-      OpenSSLSpeedParser.run(self)
-    end
-
     #
     # Generate CSVs, SVGs, and HTML fragments, then return map of arch
     # to HTML fragments.
     #
     def save(all_data)
-      save_csvs(all_data)
-      svgs = save_svgs(all_data)
+      # save_csvs(all_data)
+      DataCSVsView.run(self)
+      HostsCSVView.run(self)
+      svgs = SVGView.run(self)
       make_html(svgs)
-    end
-
-    #
-    # Save all CSVs.
-    #
-    def save_csvs(all_data)
-      all_data.each do |arch, algos|
-        algos.each do |algo, data|
-          save_csv(
-            '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
-            COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
-            data[:rows]
-          )
-        end
-      end
-    end
-
-    #
-    # Save SVGs and return a lut of arch to svgs.
-    #
-    def save_svgs(all_data)
-      pids = []
-      svgs = Hash.new { |h, k| h[k] = [] }
-      # generate svgs
-      data = all_data.keys.each do |arch|
-        # omit algo=all svgs because they are too large
-        all_data[arch].keys.select { |algo|
-          algo != 'all'
-        }.each do |algo|
-          # get rows
-          rows = all_data[arch][algo][:rows]
-
-          # get maximum value for plot
-          max = get_max_value(all_data, arch, algo)
-
-          # build svg data
-          svg = make_svg(arch, algo, max, rows)
-
-          # add to svg lut
-          svgs[arch] << {
-            algo: algo,
-            path: svg[:path],
-            rows: svg[:rows].reverse,
-            title: svg[:title],
-          }
-
-          # save in background and add pid list of pids
-          pids << save_svg(svg)
-        end
-      end
-
-      # wait for background tasks to complete
-      join('save_svgs', pids)
-
-      # return svg data lut
-      svgs
     end
 
     #
@@ -767,31 +983,6 @@ module PiBench
 
         r
       end
-    end
-
-    #
-    # Generate CSV and HTML table of hosts and return generated HTML.
-    #
-    def make_hosts
-      save_hosts_csv
-      make_hosts_html
-    end
-
-    #
-    # Generate out/csvs/hosts.csv and return thread.
-    #
-    def save_hosts_csv
-      save_csv(
-        '%s/csvs/hosts.csv' % [out_dir],
-        COLS[:hosts].map { |col| col[:name] },
-        @config['hosts'].map { |row|
-          row.merge(get_host_data(row['name']))
-        }.map { |row|
-          COLS[:hosts].map { |col| 
-            row[col[:id]] || row[col[:id].intern]
-          }
-        }
-      )
     end
 
     #
@@ -884,131 +1075,6 @@ module PiBench
           }.merge(ARCHS[arch]))
         }.join,
       }))
-    end
-
-    #
-    # Save CSV file.
-    #
-    def save_csv(path, cols, rows)
-      CSV.open(path, 'wb') do |csv|
-        # write headers
-        csv << cols
-
-        # write rows
-        rows.each do |row|
-          csv << row
-        end
-      end
-    end
-
-    #
-    # Build data for SVG.
-    #
-    def make_svg(arch, algo, max, rows)
-      {
-        # build output path
-        path: '%s/svgs/%s-%s.svg' % [out_dir, arch, algo],
-
-        # build title
-        title: TEMPLATES[:svg_title].run({
-          arch: ARCHS[arch.intern][:name],
-          algo: algo,
-        }),
-
-        # output image size (in inches)
-        size: [6.4 * 2, 4.8 * 2],
-
-        # output image DPI
-        dpi: 100,
-
-        # font sizes (in points)
-        fontsize: {
-          yticks: 10,
-          title:  14,
-        },
-
-        # calculate xlimit (round up to nearest 50)
-        xlimit: (max / (1048576 * 50.0)).ceil * 50,
-        xlabel: 'Speed (MB/s)',
-
-        # rows (sorted in reverse order)
-        rows: rows.map { |row|
-          [
-            '%s (%d bytes)' % [row[0], row[1].to_i],
-            (row[2].to_f / 1048576).round(2),
-          ]
-        }.reverse,
-      }
-    end
-
-    #
-    # Render SVG in background and return SVG path, title, and PID.
-    #
-    def save_svg(svg)
-      # invoke plot in background, return pid
-      bg('/dev/null', [
-        # absolute path to python
-        '/usr/bin/python3',
-
-        # build path to plot.py
-        '%s/plot.py' % [__dir__],
-
-        # build chart json data
-        JSON.unparse(svg),
-      ])
-    end
-
-    #
-    # get maximum value depending for chart
-    #
-    def get_max_value(data, arch, algo)
-      is_aes = is_aes?(algo)
-
-      data['all'].keys.select { |k|
-        is_aes == is_aes?(k)
-      }.map { |k|
-        data[arch][k][:max]
-      }.reduce(0) { |rm, v|
-        v > rm ? v : rm
-      }
-    end
-
-    #
-    # Is the given algorithm AES?
-    #
-    def is_aes?(algo)
-      @is_aes_cache ||= {}
-      @is_aes_cache[algo] ||= !!(algo =~ /^aes/)
-    end
-
-    #
-    # join set of PIDs together
-    #
-    def join(set_name, pids = [])
-      @log.debug('join') do
-        JSON.unparse({
-          set_name: set_name,
-          pids: pids,
-        })
-      end
-
-      # wait for all tasks to complete and check for errors
-      errors = pids.reduce([]) do |r, pid|
-        Process.wait(pid)
-        $?.success? ? r : (r << pid)
-      end
-
-      if errors.size > 0
-        # build error message
-        err = 'pids failed: %s' % [JSON.unparse({
-          set_name: set_name,
-          pids: errors,
-        })]
-
-        # log and raise error
-        @log.fatal('join') { err }
-        raise err
-      end
     end
   end
 
