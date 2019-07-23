@@ -639,27 +639,26 @@ module PiBench
   class CPUInfoParser < Parser
     def run
       @model.config['hosts'].reduce({}) do |r, row|
-        path = '%s/hosts/%s/lscpu.txt' % [out_dir, row['name']]
-
-        r[row['name']] = expand(File.readlines(path).reduce({}) do |hr, line|
+        r[row['name']] = File.readlines('%s/hosts/%s/lscpu.txt' % [
+          out_dir,
+          row['name'],
+        ]).reduce({}) do |hr, line|
           row = line.strip.split(/:\s+/)
           hr[make_key(row[0])] = row[1]
 
           hr
-        end)
+        end.tap do |h|
+          h.update({
+            mhz: (h['cpu-max-mhz'] || h['cpu-mhz']).to_f.round,
+            aes: h['flags'] =~ /aes/ ? 'Yes' : 'No',
+          })
+        end
 
         r
       end
     end
 
     private
-
-    def expand(h)
-      h.merge({
-        mhz: (h['cpu-max-mhz'] || h['cpu-mhz']).to_f.round,
-        aes: h['flags'] =~ /aes/ ? 'Yes' : 'No',
-      })
-    end
 
     def make_key(s)
       s.downcase
@@ -669,36 +668,8 @@ module PiBench
     end
   end
 
-  class View < Action
-  end
-
-  #
-  # Save data csvs.
-  #
-  class DataCSVsView < View
+  class SVGDataParser < Parser
     def run
-      @model.speeds.each do |arch, algos|
-        algos.each do |algo, data|
-          Util.save_csv(
-            '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
-            COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
-            data[:rows]
-          )
-        end
-      end
-    end
-  end
-
-  class SVGView < View
-    include BG
-
-    def initialize(model)
-      super(model)
-      @log = @model.log
-    end
-
-    def run
-      pids = []
       svgs = Hash.new { |h, k| h[k] = [] }
 
       # generate svgs
@@ -717,20 +688,9 @@ module PiBench
           svg = make_svg(arch, algo, max, rows)
 
           # add to svg lut
-          svgs[arch] << {
-            algo: algo,
-            path: svg[:path],
-            rows: svg[:rows],
-            title: svg[:title],
-          }
-
-          # save in background and add pid list of pids
-          pids << save_svg(svg)
+          svgs[arch] << svg
         end
       end
-
-      # wait for background tasks to complete
-      join('save_svgs', pids)
 
       # return svg data lut
       svgs
@@ -743,6 +703,10 @@ module PiBench
     #
     def make_svg(arch, algo, max, rows)
       {
+        # save arch and algo
+        arch: arch,
+        algo: algo,
+
         # build output path
         path: '%s/svgs/%s-%s.svg' % [out_dir, arch, algo],
 
@@ -779,23 +743,6 @@ module PiBench
     end
 
     #
-    # Render SVG in background and return SVG path, title, and PID.
-    #
-    def save_svg(svg)
-      # invoke plot in background, return pid
-      bg('/dev/null', [
-        # absolute path to python
-        '/usr/bin/python3',
-
-        # build path to plot.py
-        '%s/plot.py' % [__dir__],
-
-        # build chart json data
-        JSON.unparse(svg),
-      ])
-    end
-
-    #
     # get maximum value depending for chart
     #
     def get_max_value(arch, algo)
@@ -817,17 +764,76 @@ module PiBench
       @is_aes_cache ||= {}
       @is_aes_cache[algo] ||= !!(algo =~ /^aes/)
     end
+  end
+
+  # base view class
+  class View < Action
+  end
+
+  #
+  # Save data csvs.
+  #
+  class DataCSVsView < View
+    def run
+      @model.speeds.each do |arch, algos|
+        algos.each do |algo, data|
+          Util.save_csv(
+            '%s/csvs/%s-%s.csv' % [out_dir, arch, algo],
+            COLS[(algo == 'all') ? :all : :algo].map { |col| col[:id] },
+            data[:rows]
+          )
+        end
+      end
+    end
+  end
+
+  class SVGView < View
+    include BG
+
+    def initialize(model)
+      super(model)
+      @log = @model.log
+    end
+
+    def run
+      pids = []
+
+      # generate svgs
+      @model.svgs.each do |arch, svgs|
+        svgs.each do |svg|
+          # save in background and add pid list of pids
+          pids << save_svg(svg)
+        end
+      end
+
+      # wait for background tasks to complete
+      join(pids)
+    end
+
+    private
+
+    #
+    # Render SVG in background and return SVG path, title, and PID.
+    #
+    def save_svg(svg)
+      # invoke plot in background, return pid
+      bg('/dev/null', [
+        # absolute path to python
+        '/usr/bin/python3',
+
+        # build path to plot.py
+        '%s/plot.py' % [__dir__],
+
+        # build chart json data
+        JSON.unparse(svg),
+      ])
+    end
 
     #
     # join set of PIDs together
     #
-    def join(set_name, pids = [])
-      @log.debug('join') do
-        JSON.unparse({
-          set_name: set_name,
-          pids: pids,
-        })
-      end
+    def join(pids = [])
+      @log.debug('join') { JSON.unparse({ pids: pids }) }
 
       # wait for all tasks to complete and check for errors
       errors = pids.reduce([]) do |r, pid|
@@ -835,12 +841,10 @@ module PiBench
         $?.success? ? r : (r << pid)
       end
 
+      # check for errors
       if errors.size > 0
         # build error message
-        err = 'pids failed: %s' % [JSON.unparse({
-          set_name: set_name,
-          pids: errors,
-        })]
+        err = 'failed PIDs: %s' % [JSON.unparse(errors)]
 
         # log and raise error
         @log.fatal('join') { err }
@@ -921,13 +925,13 @@ module PiBench
       HostsCSVView.run(@model)
 
       # render svgs, return svg info
-      svgs = SVGView.run(@model)
+      SVGView.run(@model)
 
       # create svg lists view
       view = SVGListHTMLView.new(@model)
 
       # render svg lists as html
-      html = svgs.reduce({}) do |r, pair|
+      html = @model.svgs.reduce({}) do |r, pair|
         r[pair[0]] = view.run(pair[1])
         r
       end
@@ -971,6 +975,7 @@ module PiBench
     attr_reader :speeds
     attr_reader :versions
     attr_reader :cpus
+    attr_reader :svgs
 
     def initialize(config)
       # cache config
@@ -991,6 +996,9 @@ module PiBench
       @speeds = OpenSSLSpeedParser.run(self)
       @versions = OpenSSLVersionParser.run(self)
       @cpus = CPUInfoParser.run(self)
+
+      # render svg data (references data loaded above)
+      @svgs = SVGDataParser.run(self)
     end
 
     #
