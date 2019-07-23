@@ -264,36 +264,11 @@ module PiBench
 
     svg: %{
       <img
-        src='%{svg_path|h}'
+        src='%{path|h}'
         class='img-fluid'
         title='%{name|h}'
         alt='%{name|h}'
       />
-
-      <!-- table class='hide table table-bordered table-sm table-hover'>
-        <thead>
-          <tr>
-            <td>Name</td>
-            <td>Speed</td>
-          </tr>
-        </thead>
-
-        <tbody>
-          %{rows}
-        </tbody>
-
-        <tfoot>
-          <tr>
-            <td colspan='2'>
-              <a
-                href='%{csv_path|h}'
-                title='Download CSV.'
-              >
-                Download
-              </a>
-            </td>
-        </tfoot>
-      </table -->
     }.strip,
 
     svg_row: %{
@@ -333,6 +308,18 @@ module PiBench
         rows.each do |row|
           csv << row
         end
+      end
+    end
+
+    #
+    # Load config file and check for required keys.
+    #
+    def self.load_config(path)
+      # read/check config
+      ::YAML.load_file(path).tap do |r|
+        # check for required config keys
+        missing = %w{out_dir hosts}.reject { |key| r.key?(key) }
+        raise "Missing required config keys: #{missing}" if missing.size > 0
       end
     end
   end
@@ -484,7 +471,7 @@ module PiBench
     end
   end
 
-  class Parser
+  class Action
     def self.run(model)
       new(model).run
     end
@@ -498,6 +485,77 @@ module PiBench
     def out_dir
       @model.out_dir
     end
+  end
+
+  #
+  # Fetch any needed data.
+  #
+  class DataFetcher < Action
+    def run
+      make_output_dirs
+      fetch_data
+    end
+
+    private
+
+    #
+    # Create output directories
+    #
+    def make_output_dirs
+      dirs = (%w{html csvs svgs} + @model.config['hosts'].map { |row|
+        'hosts/%s' % [row['name']]
+      }).map { |dir|
+        '%s/%s' % [out_dir, dir]
+      }
+
+      @model.log.debug { 'creating output dirs: %s' % [dirs.join(', ')] }
+      FileUtils.mkdir_p(dirs)
+    end
+
+    #
+    # Spawn tasks in background and block until they are complete.
+    #
+    def fetch_data
+      # build map of hosts to commands
+      queues = Hash.new { |h, k| h[k] = [] }
+
+      # populate map
+      @model.config['hosts'].each do |row|
+        TESTS.each do |test|
+          case test[:type]
+          when 'algos'
+            # queue test command for each algorithm
+            (@model.config['algos'] || ALGOS).each do |algo|
+              queues[row['host']] << {
+                cmd: [*test[:exec], algo],
+                out: '%s/hosts/%s/%s-%s.txt' % [
+                  out_dir,
+                  row['name'],
+                  test[:name],
+                  algo,
+                ],
+              }
+            end
+          else
+            # queue command for test
+            queues[row['host']] << {
+              cmd: test[:exec],
+              out: '%s/hosts/%s/%s.txt' % [
+                out_dir,
+                row['name'],
+                test[:name],
+              ]
+            }
+          end
+        end
+      end
+
+      # block until all task queues have completed successfully
+      HostQueue.run(@model.log, queues)
+    end
+  end
+
+  class Parser < Action
   end
 
   #
@@ -611,20 +669,7 @@ module PiBench
     end
   end
 
-  class View
-    def self.run(model)
-      new(model).run
-    end
-
-    def initialize(model)
-      @model = model
-    end
-
-    protected
-
-    def out_dir
-      @model.config['out_dir']
-    end
+  class View < Action
   end
 
   #
@@ -825,177 +870,20 @@ module PiBench
     end
   end
 
-  class Runner
-    include BG
-
-    attr_reader :config
-    attr_reader :log
-    attr_reader :data
-    attr_reader :speeds
-    attr_reader :versions
-    attr_reader :cpus
-
-    #
-    # Allow one-shot invocation.
-    #
-    def initialize(config)
-      # cache config
-      @config = config
-
-      # get log level
-      log_level = (@config['log_level'] || 'info').upcase
-
-      # create logger and set log level
-      @log = ::Logger.new(STDERR)
-      @log.level = ::Logger.const_get(log_level)
-      @log.debug { "log level = #{log_level}" }
-    end
-
-    #
-    # Run benchmarks (if necessary) and generate output CSVs and SVGs.
-    #
+  #
+  # Generate HTML for hosts section.
+  #
+  class HostsSectionHTMLView < View
     def run
-      # create output directories
-      make_output_dirs
-
-      # connect to hosts in background, wait for all to complete
-      spawn_benchmarks
-
-      # load parsed data
-      @speeds = OpenSSLSpeedParser.run(self)
-      @versions = OpenSSLVersionParser.run(self)
-      @cpus = CPUInfoParser.run(self)
-
-      # generate CSVs, SVGs, and HTML fragments, wait for all to
-      # complete, and return HTML fragments by section
-      html = save(@speeds)
-
-      # save index.html
-      save_index_html(html.merge({
-        hosts: make_hosts_html,
-      }))
-    end
-
-    #
-    # Get output directory.
-    #
-    def out_dir
-      @config['out_dir']
-    end
-
-    private
-
-    #
-    # Create output directories
-    #
-    def make_output_dirs
-      dirs = (%w{html csvs svgs} + @config['hosts'].map { |row|
-        'hosts/%s' % [row['name']]
-      }).map { |dir|
-        '%s/%s' % [out_dir, dir]
-      }
-
-      @log.debug { 'creating output dirs: %s' % [dirs.join(', ')] }
-      FileUtils.mkdir_p(dirs)
-    end
-
-    #
-    # Spawn benchmark tasks in background and block until they are
-    # complete.
-    #
-    def spawn_benchmarks
-      # build map of hosts to commands
-      queues = Hash.new { |h, k| h[k] = [] }
-
-      # populate map
-      @config['hosts'].each do |row|
-        TESTS.each do |test|
-          case test[:type]
-          when 'algos'
-            # queue test command for each algorithm
-            (@config['algos'] || ALGOS).each do |algo|
-              queues[row['host']] << {
-                cmd: [*test[:exec], algo],
-                out: '%s/hosts/%s/%s-%s.txt' % [
-                  out_dir,
-                  row['name'],
-                  test[:name],
-                  algo,
-                ],
-              }
-            end
-          else
-            # queue command for test
-            queues[row['host']] << {
-              cmd: test[:exec],
-              out: '%s/hosts/%s/%s.txt' % [
-                out_dir,
-                row['name'],
-                test[:name],
-              ]
-            }
-          end
-        end
-      end
-
-      # block until all task queues have completed successfully
-      HostQueue.run(@log, queues)
-    end
-
-    #
-    # Generate CSVs, SVGs, and HTML fragments, then return map of arch
-    # to HTML fragments.
-    #
-    def save(all_data)
-      # save_csvs(all_data)
-      DataCSVsView.run(self)
-      HostsCSVView.run(self)
-      svgs = SVGView.run(self)
-      make_html(svgs)
-    end
-
-    #
-    # Generate HTML fragments for each architecture.
-    #
-    def make_html(svgs)
-      svgs.keys.reduce({}) do |r, arch|
-        r[arch] = svgs[arch].sort { |a, b|
-          a[:path] <=> b[:path]
-        }.map { |row|
-          TEMPLATES[:svg].run({
-            svg_path: 'svgs/%s' % [File.basename(row[:path])],
-
-            # path to downloadable CSV
-            csv_path: 'csvs/%s' % [
-              File.basename(row[:path]).gsub(/svg$/, 'csv'),
-            ],
-
-            name: row[:title],
-
-            rows: row[:rows].map { |row|
-              TEMPLATES[:svg_row].run({
-                name: row[0],
-                val: row[1],
-              })
-            }.join,
-          })
-        }.join
-
-        r
-      end
-    end
-
-    #
-    # Generate and return hosts HTML.
-    #
-    def make_hosts_html
       TEMPLATES[:all].run({
         cols: COLS[:hosts].map { |col|
           TEMPLATES[:col].run(col)
         }.join,
 
-        rows: @config['hosts'].map { |row|
-          row.merge(get_host_data(row['name']))
+        rows: @model.config['hosts'].map { |row|
+          row.merge(@model.cpus[row['name']]).merge({
+            openssl: @model.versions[row['name']],
+          })
         }.map { |row|
           TEMPLATES[:row].run({
             row: COLS[:hosts].map { |col|
@@ -1008,59 +896,57 @@ module PiBench
         }.join,
       })
     end
+  end
 
-    def get_host_data(host)
-      @host_data ||= {}
-
-      unless @host_data.key?(host)
-        lscpu = get_host_lscpu(host)
-        @host_data[host] = lscpu.merge({
-          mhz: (lscpu['cpu-max-mhz'] || lscpu['cpu-mhz']).to_f.round,
-          aes: lscpu['flags'] =~ /aes/ ? 'Yes' : 'No',
-          openssl: get_host_openssl_version(host),
-        }).tap do |data|
-          @log.debug('get_host_data') do
-            JSON.unparse({
-              host: host,
-              data: data,
-            })
-          end
-        end
-      end
-
-      @host_data[host]
+  #
+  # Generate HTML fragment for given architecture.
+  #
+  class SVGListHTMLView < View
+    def run(svgs)
+      svgs.sort { |a, b|
+        a[:path] <=> b[:path]
+      }.map { |row|
+        TEMPLATES[:svg].run({
+          path: 'svgs/%s' % [File.basename(row[:path])],
+          name: row[:title],
+        })
+      }.join
     end
+  end
 
-    def get_host_openssl_version(host)
-      File.read('%s/hosts/%s/version.txt' % [
-        out_dir,
-        host,
-      ]).strip.split(/\s+/)[1]
-    end
+  class FullView < View
+    def run
+      # generate CSVs
+      DataCSVsView.run(@model)
+      HostsCSVView.run(@model)
 
-    #
-    # Parse host lscpu output.
-    #
-    def get_host_lscpu(host)
-      path = '%s/hosts/%s/lscpu.txt' % [out_dir, host]
+      # render svgs, return svg info
+      svgs = SVGView.run(@model)
 
-      File.readlines(path).reduce({}) do |r, line|
-        row = line.strip.split(/:\s+/)
-        key = row[0].downcase
-                .gsub(/\(s\)/, 's')
-                .gsub(/[^a-z0-9-]+/, '-')
-                .gsub(/--/, '-')
+      # create svg lists view
+      view = SVGListHTMLView.new(@model)
 
-        r[key] = row[1]
-
+      # render svg lists as html
+      html = svgs.reduce({}) do |r, pair|
+        r[pair[0]] = view.run(pair[1])
         r
       end
-    end
 
-    #
-    # Generate and write out/index.html.
-    #
-    def save_index_html(html)
+      # render hosts section
+      html[:hosts] = HostsSectionHTMLView.run(@model)
+
+      # save index.html
+      IndexHTMLView.new(@model).run(html)
+    end
+  end
+
+  #
+  # Generate and write out/index.html.
+  #
+  class IndexHTMLView < View
+    SECTIONS = %i{all arm x86}
+
+    def run(html)
       File.write('%s/index.html' % [out_dir], TEMPLATES[:index].run({
         title: 'OpenSSL Speed Test Results',
         hosts: html[:hosts],
@@ -1069,12 +955,49 @@ module PiBench
           TEMPLATES[:link].run(row)
         }.join,
 
-        sections: %i{all arm x86}.map { |arch|
+        sections: SECTIONS.map { |arch|
           TEMPLATES[:section].run({
             svgs: html[arch.to_s],
           }.merge(ARCHS[arch]))
         }.join,
       }))
+    end
+  end
+
+  class Model
+    attr_reader :config
+    attr_reader :log
+
+    attr_reader :speeds
+    attr_reader :versions
+    attr_reader :cpus
+
+    def initialize(config)
+      # cache config
+      @config = config
+
+      # get log level
+      log_level = (@config['log_level'] || 'info').upcase
+
+      # create logger and set log level
+      @log = ::Logger.new(STDERR)
+      @log.level = ::Logger.const_get(log_level)
+      @log.debug { "log level = #{log_level}" }
+
+      # fetch data (if needed)
+      DataFetcher.run(self)
+
+      # load parsed data
+      @speeds = OpenSSLSpeedParser.run(self)
+      @versions = OpenSSLVersionParser.run(self)
+      @cpus = CPUInfoParser.run(self)
+    end
+
+    #
+    # Get output directory.
+    #
+    def out_dir
+      @config['out_dir']
     end
   end
 
@@ -1084,24 +1007,16 @@ module PiBench
   def self.run(app, args)
     Luigi::FILTERS[:size] = proc { |v| v.size }
 
-    # check command-line arguments
+    # check command-line arguments, get config path
     unless config_path = args.shift
       raise "Usage: #{app} config.yaml"
     end
 
-    Runner.new(load_config(config_path)).run
-  end
+    # load config, load model
+    model = Model.new(Util.load_config(config_path))
 
-  #
-  # Load config file and check for required keys.
-  #
-  def self.load_config(path)
-    # read/check config
-    ::YAML.load_file(path).tap do |r|
-      # check for required config keys
-      missing = %w{out_dir hosts}.reject { |key| r.key?(key) }
-      raise "Missing required config keys: #{missing}" if missing.size > 0
-    end
+    # render everything
+    FullView.run(model)
   end
 end
 
