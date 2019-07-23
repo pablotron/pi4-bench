@@ -720,7 +720,7 @@ module PiBench
           svgs[arch] << {
             algo: algo,
             path: svg[:path],
-            rows: svg[:rows].reverse,
+            rows: svg[:rows],
             title: svg[:title],
           }
 
@@ -774,7 +774,7 @@ module PiBench
             '%s (%d bytes)' % [row[0], row[1].to_i],
             (row[2].to_f / 1048576).round(2),
           ]
-        }.reverse,
+        },
       }
     end
 

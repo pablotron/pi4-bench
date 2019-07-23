@@ -19,14 +19,15 @@ if len(sys.argv) < 2:
 
 # decode json data from first argument
 data = json.loads(sys.argv[1])
+rows = data['rows'][::-1]
 
 # plot values
 plt.barh(
-  np.arange(len(data['rows'])),
-  [row[1] for row in data['rows']],
+  np.arange(len(rows)),
+  [row[1] for row in rows],
   align = 'center',
   alpha = 0.5,
-  tick_label = [row[0] for row in data['rows']]
+  tick_label = [row[0] for row in rows]
 )
 
 # set plot parameters
