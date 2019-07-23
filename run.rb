@@ -615,8 +615,8 @@ module PiBench
 
             # parse speed files
             Dir[glob].each do |path|
-              # get arch
-              arch = row['pi'] ? 'arm' : 'x86'
+              # get arch set (e.g. "arm" or "x86")
+              arch = row['set']
 
               # parse file
               File.readlines(path).select { |line|
